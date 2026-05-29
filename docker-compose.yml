@@ -1,0 +1,29 @@
+services:
+  gateway:
+    build: .
+    container_name: hermes-llm-gateway
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8080:8080"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      GATEWAY_API_KEY: ${GATEWAY_API_KEY:-}
+      HERMES_ALLOW_INSECURE_DEV: ${HERMES_ALLOW_INSECURE_DEV:-}
+      HERMES_STATE_DIR: /state
+      HERMES_WORK_DIR: /work
+      CLAUDE_ACCOUNT_BASE: /accounts/claude
+      CODEX_ACCOUNT_BASE: /accounts/codex
+    volumes:
+      - hermes-gw-state:/state
+      - hermes-gw-work:/work
+      - ${HOME}/.claude-accounts/acct1:/accounts/claude/acct1
+      - ${HOME}/.codex:/accounts/codex/acct1
+      # Add more account mounts after login on the host:
+      # - ${HOME}/.claude-accounts/acct2:/accounts/claude/acct2
+      # - ${HOME}/.claude-accounts/acct3:/accounts/claude/acct3
+
+volumes:
+  hermes-gw-state:
+  hermes-gw-work:

@@ -15,7 +15,14 @@ RUN pip install --no-cache-dir .
 
 RUN npm install -g @anthropic-ai/claude-code @openai/codex
 
-RUN useradd --create-home --shell /bin/bash gateway \
+# Match the host user's uid/gid so bind-mounted account dirs (Claude/Codex
+# credentials) are writable from inside the container and land on the host
+# owned by the invoking user. compose passes these from .env (HOST_UID/HOST_GID).
+ARG HOST_UID=1000
+ARG HOST_GID=1000
+
+RUN groupadd -g ${HOST_GID} gateway \
+    && useradd --create-home --shell /bin/bash -u ${HOST_UID} -g ${HOST_GID} gateway \
     && mkdir -p /state /work /accounts/claude /accounts/codex \
     && chown -R gateway:gateway /state /work /accounts
 

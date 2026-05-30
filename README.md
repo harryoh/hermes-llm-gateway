@@ -80,16 +80,29 @@ docker compose exec gateway sh -lc \
 - `claude setup-token` (Claude Code 2.x) **prints the token to stdout** instead of writing a credential file. The container has nowhere to persist it.
 - `claude auth login` **on the host (macOS)** stores OAuth credentials in the **macOS Keychain**, which Linux containers cannot read. The login must happen *inside* the container so the credential file lands on the bind-mounted volume.
 
-### 5. Authenticate Codex **inside the container**
+### 5. Authenticate Codex **on the host**
+
+Unlike Claude, Codex login is done on the **host**, not inside the container. Codex stores its auth in `$CODEX_HOME/auth.json` — a plain file with no Keychain involvement on Linux — and `~/.codex` is bind-mounted into the container, so a host-side login lands the credentials exactly where the gateway reads them.
+
+> **Do not use `codex login --device-auth` inside the container.** It hits an account-level "Enable device code authorization for Codex" gate that cannot be cleared from the CLI, and the default in-container `codex login` opens a `localhost:1455` browser callback the container cannot serve. Host login sidesteps both.
+
+Install the CLI on the host (once) and log in:
 
 ```bash
-docker compose exec gateway sh -lc \
-  'CODEX_HOME=/accounts/codex/acct1 codex login --device-auth'
+npm install -g @openai/codex
+CODEX_HOME=~/.codex codex login
 ```
 
-`--device-auth` is required when running inside the container — the default `codex login` flow opens a local browser callback that the container cannot serve, so it has to be told to use the device-code flow instead (URL + code, like `claude auth login`). On a host with a desktop browser you can omit the flag.
+A browser opens (or a URL is printed) and redirects to `http://localhost:1455/...` — on a host with a desktop browser this just works. On success, `~/.codex/auth.json` appears and the container sees it immediately.
 
-Codex stores its auth in `$CODEX_HOME/auth.json` (a regular file, no Keychain), so unlike `claude setup-token` this works straightforwardly from inside the container. The token lands on the host at `~/.codex/auth.json` via the bind mount, so the host `codex` CLI — if you have one installed for other reasons — reads the same credentials.
+**Headless / remote host (no local browser):** the `localhost:1455` callback runs on the *server*, so you must reach it from your workstation. Forward the port over SSH, then log in inside that session:
+
+```bash
+ssh -L 1455:localhost:1455 <user>@<server>
+CODEX_HOME=~/.codex codex login        # open the printed URL in your laptop browser
+```
+
+The OAuth redirect to `localhost:1455` tunnels back to the server's callback server and completes. Alternatively, run `codex login` on your laptop and copy the result over: `scp ~/.codex/auth.json <user>@<server>:~/.codex/auth.json` — the token is account-bound, not machine-bound.
 
 Verify (writes the final assistant message to a file, then reads it back — this matches how the gateway invokes Codex):
 

@@ -76,7 +76,16 @@ async def call_claude(
 
         return asyncio.run(run_proc())
 
-    returncode, out, err = await asyncio.to_thread(_run_with_lock, state, run_locked)
+    try:
+        returncode, out, err = await asyncio.to_thread(_run_with_lock, state, run_locked)
+    except (FileNotFoundError, OSError) as exc:
+        return BackendResult(
+            ok=False,
+            backend="claude",
+            failure_code="ERROR",
+            detail=f"failed to spawn {settings.claude_bin}: {exc}"[:500],
+            acct=acct,
+        )
     stdout = out.decode("utf-8", "ignore")
     stderr = err.decode("utf-8", "ignore")
 
@@ -188,7 +197,16 @@ async def call_codex(
         return asyncio.run(run_proc())
 
     try:
-        returncode, out, err = await asyncio.to_thread(_run_with_lock, state, run_locked)
+        try:
+            returncode, out, err = await asyncio.to_thread(_run_with_lock, state, run_locked)
+        except (FileNotFoundError, OSError) as exc:
+            return BackendResult(
+                ok=False,
+                backend="codex",
+                failure_code="ERROR",
+                detail=f"failed to spawn {settings.codex_bin}: {exc}"[:500],
+                acct=acct,
+            )
         stdout = out.decode("utf-8", "ignore")
         stderr = err.decode("utf-8", "ignore")
         text = ""

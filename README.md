@@ -1,42 +1,211 @@
 # Hermes LLM Gateway
 
-OpenAI-compatible local Gateway for Hermes.
-
-Current local flow:
+OpenAI-compatible local Gateway that routes requests to Claude Code CLI and OpenAI Codex CLI, with cooldown-aware fallback.
 
 ```text
-Hermes host process
+Hermes (host or container)
   -> http://127.0.0.1:8080/v1
   -> Gateway container
-  -> Claude CLI
-  -> fallback to Codex CLI
+       -> Claude CLI  (primary)
+       -> Codex CLI   (fallback)
+       -> 503         (no DGX backend yet)
 ```
 
-Local-only development mode is enabled with:
+---
+
+## New-machine setup (dev mode)
+
+Follow in order. Each step is independent and the order matters — auth must land inside the container, mount source dirs must exist before `compose up`, etc.
+
+### 0. Prerequisites
+
+- Docker Desktop (Mac/Windows) 4.34+ or Docker Engine (Linux)
+- Claude subscription (Pro/Max/Team) — required for `claude login`
+- ChatGPT/Codex account — required for `codex login`
+- Node + npm on host (only for installing the `codex` CLI on host; the gateway container has its own)
+
+### 1. Clone and create mount source dirs
+
+Docker bind-mounts fail or create root-owned dirs if the host path is missing — create them first.
 
 ```bash
-HERMES_ALLOW_INSECURE_DEV=1 GATEWAY_API_KEY= docker compose up -d gateway
+git clone https://github.com/harryoh/hermes-llm-gateway.git
+cd hermes-llm-gateway
+
+mkdir -p ~/.claude-accounts/acct1 ~/.codex
 ```
 
-Hermes Custom API:
+### 2. Create `.env` (local dev)
 
-```text
-base_url = http://127.0.0.1:8080/v1
-model = auto
-api_key = empty
+```bash
+cp .env.example .env
 ```
 
-Run smoke tests:
+The defaults (`HERMES_ALLOW_INSECURE_DEV=1`, empty `GATEWAY_API_KEY`) let the gateway run without an API key for localhost-only use. Clients can omit the `X-API-Key` header in this mode. For LAN exposure, see `runbook.md` §2.
+
+### 3. Build and start the gateway
+
+```bash
+docker compose up -d --build gateway
+```
+
+Verify:
+
+```bash
+curl -s http://127.0.0.1:8080/health      # {"status":"ok"}
+curl -s http://127.0.0.1:8080/v1/models   # auto / claude-primary / codex-primary
+```
+
+### 4. Authenticate Claude **inside the container**
+
+This is the most error-prone step. Read the warnings.
+
+```bash
+docker compose exec gateway sh -lc \
+  'CLAUDE_CONFIG_DIR=/accounts/claude/acct1 claude login'
+```
+
+The CLI prints a URL and a device code, then blocks waiting for the code — **keep the terminal open**. Open the URL in your host browser, approve, copy the code shown after approval, paste it back into the CLI. On success, `~/.claude-accounts/acct1/.credentials.json` appears on the host (via the bind mount).
+
+Verify:
+
+```bash
+docker compose exec gateway sh -lc \
+  'CLAUDE_CONFIG_DIR=/accounts/claude/acct1 claude -p --output-format json "Reply: pong"' \
+  | python -c "import sys,json; d=json.load(sys.stdin); print('is_error:', d['is_error'], '| result:', d['result'])"
+```
+
+#### Why not `claude setup-token` or host-side `claude login`?
+
+- `claude setup-token` (Claude Code 2.x) **prints the token to stdout** instead of writing a credential file. The container has nowhere to persist it.
+- `claude login` **on the host (macOS)** stores OAuth credentials in the **macOS Keychain**, which Linux containers cannot read. The login must happen *inside* the container so the credential file lands on the bind-mounted volume.
+
+### 5. Authenticate Codex **inside the container**
+
+```bash
+docker compose exec gateway sh -lc \
+  'CODEX_HOME=/accounts/codex/acct1 codex login'
+```
+
+Codex stores its auth in `$CODEX_HOME/auth.json` (a regular file, no Keychain), so unlike `claude setup-token` this works straightforwardly from inside the container. The token lands on the host at `~/.codex/auth.json` via the bind mount, so the host `codex` CLI — if you have one installed for other reasons — reads the same credentials.
+
+Verify (writes the final assistant message to a file, then reads it back — this matches how the gateway invokes Codex):
+
+```bash
+docker compose exec gateway sh -lc '
+  echo "Reply with exactly: pong" \
+    | CODEX_HOME=/accounts/codex/acct1 codex exec \
+        --sandbox read-only --skip-git-repo-check --color never \
+        --cd /work --output-last-message /tmp/codex-last - \
+    && echo --- && cat /tmp/codex-last && rm -f /tmp/codex-last
+'
+```
+
+Expect `pong` after the `---` separator.
+
+### 6. End-to-end check
+
+```bash
+curl -s -X POST http://127.0.0.1:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"auto","messages":[{"role":"user","content":"Reply with: pong"}]}' \
+  | python -m json.tool
+```
+
+Expected: HTTP 200, `choices[0].message.content == "pong"`, `model == "claude-primary"`.
+
+Streaming:
+
+```bash
+curl -N -X POST http://127.0.0.1:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"auto","stream":true,"messages":[{"role":"user","content":"hi"}]}'
+```
+
+Run the smoke tests to exercise every endpoint, the model fallback chain, and the rejected-fields path in one shot:
 
 ```bash
 bash scripts/smoke.sh
 ```
 
+---
+
+## Hermes integration
+
+Point Hermes' custom provider at the gateway. Hermes can run on the host (recommended for system access) or in its own container.
+
+`~/.hermes/config.yaml`:
+
+```yaml
+model:
+  provider: custom
+  base_url: http://127.0.0.1:8080/v1
+  default: auto
+  api_key: ""   # gateway runs with HERMES_ALLOW_INSECURE_DEV=1; set this if you enable GATEWAY_API_KEY
+```
+
+Networking notes:
+
+- **Hermes on the host** — `http://127.0.0.1:8080/v1` works directly.
+- **Hermes in a Docker container with `network_mode: host`** — same URL works (Linux only — Docker Desktop for macOS/Windows does not fully honor `network_mode: host`).
+- **Hermes in a bridge-network container, or Docker Desktop on macOS/Windows** — use `http://host.docker.internal:8080/v1`.
+
+Hermes is **chat-only** through this gateway — see "Request field policy" below for why.
+
+---
+
 ## Request field policy
 
-- `stream` — supported. `stream=true` returns `text/event-stream` (role / content / finish / `[DONE]`).
-- `tools`, `tool_choice` — accepted but **silently dropped**. The backend CLI does not surface tool calls, so the response is plain text. Dropped field names are recorded as `silently_stripped` in `gateway.jsonl`.
-- `response_format` — rejected with HTTP 400. The gateway cannot guarantee structured output and silently violating the constraint would mislead clients.
+| Field | Behavior | Notes |
+|---|---|---|
+| `stream` | Supported | `stream=true` → `text/event-stream` (role / content / finish / `[DONE]`) |
+| `tools`, `tool_choice` | **Silently dropped** | Backend CLI cannot emit `tool_calls`. Dropped field names recorded as `silently_stripped` in `gateway.jsonl`. |
+| `response_format` | **Rejected (HTTP 400)** | Silently violating an output-format constraint would mislead clients. |
+| Unknown `model` | Rejected (HTTP 400) | Allowed: `auto`, `claude-primary`, `codex-primary`. |
 
-Operational details are in `runbook.md`. Implementation tasks are tracked in `tasks.md`.
+Hermes' agentic capabilities (file editing, terminal, browser) are blocked by the silent-strip — see `tasks.md` for the planned Anthropic Messages API migration that would enable real tool passthrough.
 
+---
+
+## Operations cheatsheet
+
+```bash
+# Tail the structured event log
+docker compose exec gateway sh -lc 'tail -f /state/gateway.jsonl'
+
+# Show active account and current cooldowns
+curl -s http://127.0.0.1:8080/admin/health | python -m json.tool
+
+# Switch active account (validated against ^[A-Za-z0-9_.-]+$)
+curl -s -X POST http://127.0.0.1:8080/admin/switch \
+  -H "Content-Type: application/json" -d '{"acct":"acct2"}'
+
+# Smoke tests (health / models / switch / claude / codex / response_format 400)
+bash scripts/smoke.sh
+```
+
+---
+
+## Multi-account
+
+Set up additional accounts by repeating step 4 with a different mount target:
+
+```bash
+mkdir -p ~/.claude-accounts/acct2
+# Uncomment the matching `acct2` mount line that already exists in
+# docker-compose.yml (and add acct3 there if you want a third):
+#   - ${HOME}/.claude-accounts/acct2:/accounts/claude/acct2
+docker compose up -d gateway
+docker compose exec gateway sh -lc \
+  'CLAUDE_CONFIG_DIR=/accounts/claude/acct2 claude login'
+```
+
+The gateway auto-cools down an account when it hits `RATE_LIMIT` / `AUTH` markers. Switching active accounts after that is manual via `/admin/switch` (Telegram bot is planned).
+
+---
+
+## Further reading
+
+- `runbook.md` — production / LAN exposure, multi-account setup details, smoke tests
+- `tasks.md` — phase plan and open work
+- `prd.md` — design rationale (Korean)

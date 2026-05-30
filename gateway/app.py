@@ -6,12 +6,14 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi.responses import StreamingResponse
 
 from gateway.backends import call_claude, call_codex, serialize_messages
 from gateway.config import Settings, load_settings
 from gateway.models import ChatCompletionRequest, SwitchAccountRequest
 from gateway.notify import notify_telegram
 from gateway.state import GatewayState
+from gateway.stream import text_to_sse_stream
 
 settings: Settings = load_settings()
 state = GatewayState(settings.state_dir, settings.active_claude_acct, settings.cooldown_hours)
@@ -40,8 +42,6 @@ def check_api_key(x_api_key: str | None) -> None:
 
 def unsupported_fields(req: ChatCompletionRequest) -> list[str]:
     fields: list[str] = []
-    if req.stream:
-        fields.append("stream")
     if req.tools is not None:
         fields.append("tools")
     if req.tool_choice is not None:
@@ -66,6 +66,15 @@ def openai_response(model: str, text: str) -> dict[str, Any]:
         ],
         "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
     }
+
+
+def build_response(model: str, text: str, stream: bool):
+    if stream:
+        return StreamingResponse(
+            text_to_sse_stream(text, model),
+            media_type="text/event-stream",
+        )
+    return openai_response(model, text)
 
 
 @app.get("/health")
@@ -154,7 +163,7 @@ async def chat(
                 output_chars=len(result.text),
                 unsupported_fields=[],
             )
-            return openai_response("codex-primary", result.text)
+            return build_response("codex-primary", result.text, req.stream)
         state.log_event(
             request_id=request_id,
             backend="codex",
@@ -188,7 +197,7 @@ async def chat(
             output_chars=len(result.text),
             unsupported_fields=[],
         )
-        return openai_response("claude-primary", result.text)
+        return build_response("claude-primary", result.text, req.stream)
 
     state.log_event(
         request_id=request_id,
@@ -229,7 +238,7 @@ async def chat(
             fallback_reason=result.failure_code,
             unsupported_fields=[],
         )
-        return openai_response("codex-primary", codex_result.text)
+        return build_response("codex-primary", codex_result.text, req.stream)
 
     state.log_event(
         request_id=request_id,

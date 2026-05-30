@@ -20,7 +20,7 @@ Follow in order. Each step is independent and the order matters — auth must la
 ### 0. Prerequisites
 
 - Docker Desktop (Mac/Windows) 4.34+ or Docker Engine (Linux)
-- Claude subscription (Pro/Max/Team) — required for `claude login`
+- Claude subscription (Pro/Max/Team) — required for `claude auth login`
 - ChatGPT/Codex account — required for `codex login`
 - Node + npm on host (only for installing the `codex` CLI on host; the gateway container has its own)
 
@@ -41,7 +41,7 @@ mkdir -p ~/.claude-accounts/acct1 ~/.codex
 cp .env.example .env
 ```
 
-The defaults (`HERMES_ALLOW_INSECURE_DEV=1`, empty `GATEWAY_API_KEY`) let the gateway run without an API key for localhost-only use. Clients can omit the `X-API-Key` header in this mode. For LAN exposure, see `runbook.md` §2.
+The defaults (`HERMES_ALLOW_INSECURE_DEV=1`, empty `GATEWAY_API_KEY`) let the gateway run without an API key for localhost-only use. Clients can omit the `X-API-Key` header in this mode. For LAN exposure (different machine calling in), see the "Production / LAN exposure" section below.
 
 ### 3. Build and start the gateway
 
@@ -62,7 +62,7 @@ This is the most error-prone step. Read the warnings.
 
 ```bash
 docker compose exec gateway sh -lc \
-  'CLAUDE_CONFIG_DIR=/accounts/claude/acct1 claude login'
+  'CLAUDE_CONFIG_DIR=/accounts/claude/acct1 claude auth login'
 ```
 
 The CLI prints a URL and a device code, then blocks waiting for the code — **keep the terminal open**. Open the URL in your host browser, approve, copy the code shown after approval, paste it back into the CLI. On success, `~/.claude-accounts/acct1/.credentials.json` appears on the host (via the bind mount).
@@ -75,10 +75,10 @@ docker compose exec gateway sh -lc \
   | python -c "import sys,json; d=json.load(sys.stdin); print('is_error:', d['is_error'], '| result:', d['result'])"
 ```
 
-#### Why not `claude setup-token` or host-side `claude login`?
+#### Why not `claude setup-token` or host-side `claude auth login`?
 
 - `claude setup-token` (Claude Code 2.x) **prints the token to stdout** instead of writing a credential file. The container has nowhere to persist it.
-- `claude login` **on the host (macOS)** stores OAuth credentials in the **macOS Keychain**, which Linux containers cannot read. The login must happen *inside* the container so the credential file lands on the bind-mounted volume.
+- `claude auth login` **on the host (macOS)** stores OAuth credentials in the **macOS Keychain**, which Linux containers cannot read. The login must happen *inside* the container so the credential file lands on the bind-mounted volume.
 
 ### 5. Authenticate Codex **inside the container**
 
@@ -127,6 +127,29 @@ Run the smoke tests to exercise every endpoint, the model fallback chain, and th
 ```bash
 bash scripts/smoke.sh
 ```
+
+---
+
+## Deploying on DGX (single host)
+
+Use this when both the gateway **and** Hermes will run on the same DGX machine — no LAN exposure, no API key. SSH in, then follow steps 1–6 above verbatim. The gateway itself is CPU-only (vLLM backend that needs the GPU is planned for Phase 3 and not in this repo yet).
+
+DGX-specific notes:
+
+- **Headless is fine.** `claude auth login` prints a URL + device code. Open the URL in your laptop's browser, approve, copy the code shown after approval, paste it back into the SSH terminal. No browser needed on the DGX itself.
+- **Linux keyring trap is the same shape as macOS Keychain.** Running `claude auth login` on the DGX host (not inside the container) tries to use libsecret/gnome-keyring, which is usually missing on a headless server and leaves no credential file. Always `docker compose exec gateway sh -lc 'claude auth login'` so the token lands on the bind-mounted volume.
+- **No GPU access needed.** Plain Docker Engine works; you don't need `--gpus` or nvidia-docker for the gateway container.
+
+After the gateway is up and authenticated, install Hermes on the same DGX:
+
+```bash
+git clone https://github.com/NousResearch/hermes-agent.git
+cd hermes-agent
+mkdir -p ~/.hermes
+HERMES_UID=$(id -u) HERMES_GID=$(id -g) docker compose up -d --build
+```
+
+Hermes' compose uses `network_mode: host`, so `127.0.0.1:8080` inside the Hermes container reaches the gateway directly. Configure `~/.hermes/config.yaml` as in the "Hermes integration" section below.
 
 ---
 
@@ -186,6 +209,55 @@ bash scripts/smoke.sh
 
 ---
 
+## Production / LAN exposure
+
+Use this when the gateway runs on one machine (e.g., DGX, NAS) and clients on **other** machines call into it.
+
+1. Generate a strong API key and switch off insecure-dev mode in `.env`:
+
+   ```bash
+   echo "GATEWAY_API_KEY=$(openssl rand -hex 32)" > .env
+   echo "HERMES_ALLOW_INSECURE_DEV=0" >> .env
+   ```
+
+2. Change the port binding in `docker-compose.yml` from loopback to all interfaces (or a specific LAN IP):
+
+   ```yaml
+   ports:
+     - "0.0.0.0:8080:8080"   # was "127.0.0.1:8080:8080"
+   ```
+
+3. Recreate the container so the new env vars and port mapping take effect:
+
+   ```bash
+   docker compose up -d --force-recreate gateway
+   ```
+
+4. Every request must now include the API key:
+
+   ```bash
+   curl -s http://<gateway-host-ip>:8080/health -H "X-API-Key: <your-key>"
+
+   curl -s -X POST http://<gateway-host-ip>:8080/v1/chat/completions \
+     -H "Content-Type: application/json" \
+     -H "X-API-Key: <your-key>" \
+     -d '{"model":"auto","messages":[{"role":"user","content":"Reply: pong"}]}'
+   ```
+
+5. Remote Hermes config:
+
+   ```yaml
+   model:
+     provider: custom
+     base_url: http://<gateway-host-ip>:8080/v1
+     default: auto
+     api_key: "<your-key>"
+   ```
+
+Host-firewall reminder: on Ubuntu/DGX OS, allow inbound 8080 with `sudo ufw allow from <client-ip> to any port 8080` if `ufw` is active.
+
+---
+
 ## Multi-account
 
 Set up additional accounts by repeating step 4 with a different mount target:
@@ -197,7 +269,7 @@ mkdir -p ~/.claude-accounts/acct2
 #   - ${HOME}/.claude-accounts/acct2:/accounts/claude/acct2
 docker compose up -d gateway
 docker compose exec gateway sh -lc \
-  'CLAUDE_CONFIG_DIR=/accounts/claude/acct2 claude login'
+  'CLAUDE_CONFIG_DIR=/accounts/claude/acct2 claude auth login'
 ```
 
 The gateway auto-cools down an account when it hits `RATE_LIMIT` / `AUTH` markers. Switching active accounts after that is manual via `/admin/switch` (Telegram bot is planned).
@@ -206,6 +278,5 @@ The gateway auto-cools down an account when it hits `RATE_LIMIT` / `AUTH` marker
 
 ## Further reading
 
-- `runbook.md` — production / LAN exposure, multi-account setup details, smoke tests
 - `tasks.md` — phase plan and open work
 - `prd.md` — design rationale (Korean)

@@ -212,4 +212,10 @@ scripts/smoke.sh
 - `model=codex-primary`
 - `model=auto`
 - Claude cooldown 시 Codex fallback
-- `stream: true` 400
+- `response_format` 400
+
+## 5. Request field policy
+
+- `stream=true` — `text/event-stream` 응답 (role / content / finish / `[DONE]`).
+- `tools`, `tool_choice` — silently dropped. JSONL의 `silently_stripped: ["tools", ...]` 필드로 audit.
+- `response_format` — 400. 구조화 출력 보장 불가.

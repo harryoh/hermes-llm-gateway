@@ -42,12 +42,17 @@ def check_api_key(x_api_key: str | None) -> None:
 
 def unsupported_fields(req: ChatCompletionRequest) -> list[str]:
     fields: list[str] = []
+    if req.response_format is not None:
+        fields.append("response_format")
+    return fields
+
+
+def silently_stripped_fields(req: ChatCompletionRequest) -> list[str]:
+    fields: list[str] = []
     if req.tools is not None:
         fields.append("tools")
     if req.tool_choice is not None:
         fields.append("tool_choice")
-    if req.response_format is not None:
-        fields.append("response_format")
     return fields
 
 
@@ -130,6 +135,7 @@ async def chat(
     request_id = request.headers.get("x-request-id", uuid.uuid4().hex)
     t0 = time.monotonic()
     unsupported = unsupported_fields(req)
+    silently_stripped = silently_stripped_fields(req)
     prompt = serialize_messages(req.messages)
 
     if req.model not in {"auto", "claude-primary", "codex-primary"}:
@@ -141,6 +147,7 @@ async def chat(
             requested_model=req.model,
             failure_code="UNSUPPORTED_FIELDS",
             unsupported_fields=unsupported,
+            silently_stripped=silently_stripped,
             prompt_chars=len(prompt),
         )
         raise HTTPException(
@@ -162,6 +169,7 @@ async def chat(
                 prompt_chars=len(prompt),
                 output_chars=len(result.text),
                 unsupported_fields=[],
+                silently_stripped=silently_stripped,
             )
             return build_response("codex-primary", result.text, req.stream)
         state.log_event(
@@ -176,6 +184,7 @@ async def chat(
             failure_code=result.failure_code,
             detail=result.detail,
             unsupported_fields=[],
+            silently_stripped=silently_stripped,
         )
         raise HTTPException(
             status_code=503,
@@ -196,6 +205,7 @@ async def chat(
             prompt_chars=len(prompt),
             output_chars=len(result.text),
             unsupported_fields=[],
+            silently_stripped=silently_stripped,
         )
         return build_response("claude-primary", result.text, req.stream)
 
@@ -211,6 +221,7 @@ async def chat(
         failure_code=result.failure_code,
         detail=result.detail,
         unsupported_fields=[],
+        silently_stripped=silently_stripped,
     )
     if result.failure_code in {"RATE_LIMIT", "AUTH", "TIMEOUT", "ERROR"}:
         key = f"claude:{result.acct}:{result.failure_code}"
@@ -237,6 +248,7 @@ async def chat(
             fallback_from="claude",
             fallback_reason=result.failure_code,
             unsupported_fields=[],
+            silently_stripped=silently_stripped,
         )
         return build_response("codex-primary", codex_result.text, req.stream)
 
@@ -254,6 +266,7 @@ async def chat(
         failure_code=codex_result.failure_code,
         detail=codex_result.detail,
         unsupported_fields=[],
+        silently_stripped=silently_stripped,
     )
     if codex_result.failure_code in {"RATE_LIMIT", "AUTH", "TIMEOUT", "ERROR"}:
         key = f"codex:{codex_result.acct}:{codex_result.failure_code}"

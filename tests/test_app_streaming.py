@@ -19,13 +19,13 @@ def test_stream_true_is_not_in_unsupported_fields() -> None:
     assert "stream" not in unsupported_fields(req)
 
 
-def test_tools_still_rejected_as_unsupported() -> None:
+def test_response_format_still_rejected_as_unsupported() -> None:
     req = ChatCompletionRequest(
         model="auto",
         messages=[ChatMessage(role="user", content="hi")],
-        tools=[{"type": "function", "function": {"name": "f"}}],
+        response_format={"type": "json_object"},
     )
-    assert "tools" in unsupported_fields(req)
+    assert "response_format" in unsupported_fields(req)
 
 
 def _decode_sse(body: bytes) -> tuple[list[dict], bool]:

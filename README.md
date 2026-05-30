@@ -84,8 +84,10 @@ docker compose exec gateway sh -lc \
 
 ```bash
 docker compose exec gateway sh -lc \
-  'CODEX_HOME=/accounts/codex/acct1 codex login'
+  'CODEX_HOME=/accounts/codex/acct1 codex login --device-auth'
 ```
+
+`--device-auth` is required when running inside the container — the default `codex login` flow opens a local browser callback that the container cannot serve, so it has to be told to use the device-code flow instead (URL + code, like `claude auth login`). On a host with a desktop browser you can omit the flag.
 
 Codex stores its auth in `$CODEX_HOME/auth.json` (a regular file, no Keychain), so unlike `claude setup-token` this works straightforwardly from inside the container. The token lands on the host at `~/.codex/auth.json` via the bind mount, so the host `codex` CLI — if you have one installed for other reasons — reads the same credentials.
 

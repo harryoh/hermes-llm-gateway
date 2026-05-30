@@ -38,13 +38,10 @@ mkdir -p ~/.claude-accounts/acct1 ~/.codex
 ### 2. Create `.env` (local dev)
 
 ```bash
-cat > .env <<'EOF'
-HERMES_ALLOW_INSECURE_DEV=1
-GATEWAY_API_KEY=
-EOF
+cp .env.example .env
 ```
 
-`HERMES_ALLOW_INSECURE_DEV=1` lets the gateway run without an API key for localhost-only use. For LAN exposure, see `runbook.md` §2.
+The defaults (`HERMES_ALLOW_INSECURE_DEV=1`, empty `GATEWAY_API_KEY`) let the gateway run without an API key for localhost-only use. Clients can omit the `X-API-Key` header in this mode. For LAN exposure, see `runbook.md` §2.
 
 ### 3. Build and start the gateway
 
@@ -68,7 +65,7 @@ docker compose exec gateway sh -lc \
   'CLAUDE_CONFIG_DIR=/accounts/claude/acct1 claude login'
 ```
 
-The CLI prints a URL and a device code. Open the URL in your host browser, approve, copy the code, paste it back into the CLI. On success, `~/.claude-accounts/acct1/.credentials.json` appears on the host (via the bind mount).
+The CLI prints a URL and a device code, then blocks waiting for the code — **keep the terminal open**. Open the URL in your host browser, approve, copy the code shown after approval, paste it back into the CLI. On success, `~/.claude-accounts/acct1/.credentials.json` appears on the host (via the bind mount).
 
 Verify:
 
@@ -83,16 +80,28 @@ docker compose exec gateway sh -lc \
 - `claude setup-token` (Claude Code 2.x) **prints the token to stdout** instead of writing a credential file. The container has nowhere to persist it.
 - `claude login` **on the host (macOS)** stores OAuth credentials in the **macOS Keychain**, which Linux containers cannot read. The login must happen *inside* the container so the credential file lands on the bind-mounted volume.
 
-### 5. Authenticate Codex on the host
-
-Codex's `login` writes `~/.codex/auth.json` to a file (not the Keychain), so host-side login is fine — the file is bind-mounted into the container.
+### 5. Authenticate Codex **inside the container**
 
 ```bash
-# Install codex CLI on the host if not already
-npm install -g @openai/codex
-
-CODEX_HOME="$HOME/.codex" codex login
+docker compose exec gateway sh -lc \
+  'CODEX_HOME=/accounts/codex/acct1 codex login'
 ```
+
+Codex stores its auth in `$CODEX_HOME/auth.json` (a regular file, no Keychain), so unlike `claude setup-token` this works straightforwardly from inside the container. The token lands on the host at `~/.codex/auth.json` via the bind mount, so the host `codex` CLI — if you have one installed for other reasons — reads the same credentials.
+
+Verify (writes the final assistant message to a file, then reads it back — this matches how the gateway invokes Codex):
+
+```bash
+docker compose exec gateway sh -lc '
+  echo "Reply with exactly: pong" \
+    | CODEX_HOME=/accounts/codex/acct1 codex exec \
+        --sandbox read-only --skip-git-repo-check --color never \
+        --cd /work --output-last-message /tmp/codex-last - \
+    && echo --- && cat /tmp/codex-last && rm -f /tmp/codex-last
+'
+```
+
+Expect `pong` after the `---` separator.
 
 ### 6. End-to-end check
 
@@ -113,6 +122,12 @@ curl -N -X POST http://127.0.0.1:8080/v1/chat/completions \
   -d '{"model":"auto","stream":true,"messages":[{"role":"user","content":"hi"}]}'
 ```
 
+Run the smoke tests to exercise every endpoint, the model fallback chain, and the rejected-fields path in one shot:
+
+```bash
+bash scripts/smoke.sh
+```
+
 ---
 
 ## Hermes integration
@@ -126,9 +141,14 @@ model:
   provider: custom
   base_url: http://127.0.0.1:8080/v1
   default: auto
+  api_key: ""   # gateway runs with HERMES_ALLOW_INSECURE_DEV=1; set this if you enable GATEWAY_API_KEY
 ```
 
-If Hermes itself runs in Docker with `network_mode: host`, the URL above is still correct. For bridge-network Hermes containers, use `http://host.docker.internal:8080/v1`.
+Networking notes:
+
+- **Hermes on the host** — `http://127.0.0.1:8080/v1` works directly.
+- **Hermes in a Docker container with `network_mode: host`** — same URL works (Linux only — Docker Desktop for macOS/Windows does not fully honor `network_mode: host`).
+- **Hermes in a bridge-network container, or Docker Desktop on macOS/Windows** — use `http://host.docker.internal:8080/v1`.
 
 Hermes is **chat-only** through this gateway — see "Request field policy" below for why.
 
@@ -172,7 +192,8 @@ Set up additional accounts by repeating step 4 with a different mount target:
 
 ```bash
 mkdir -p ~/.claude-accounts/acct2
-# edit docker-compose.yml to add:
+# Uncomment the matching `acct2` mount line that already exists in
+# docker-compose.yml (and add acct3 there if you want a third):
 #   - ${HOME}/.claude-accounts/acct2:/accounts/claude/acct2
 docker compose up -d gateway
 docker compose exec gateway sh -lc \

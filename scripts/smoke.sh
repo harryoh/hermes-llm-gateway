@@ -81,17 +81,17 @@ assert_contains "$fallback" '"content":"pong"'
 
 docker compose exec -T gateway sh -lc 'rm -f /state/cooldowns.json'
 
-say "unsupported stream"
-stream_status="$(
-  curl -sS -o /tmp/hermes-gw-stream.out -w '%{http_code}' \
+say "unsupported response_format"
+rf_status="$(
+  curl -sS -o /tmp/hermes-gw-rf.out -w '%{http_code}' \
     -H 'Content-Type: application/json' \
     -X POST "$BASE_URL/v1/chat/completions" \
-    -d '{"model":"auto","stream":true,"messages":[{"role":"user","content":"ping"}]}'
+    -d '{"model":"auto","response_format":{"type":"json_object"},"messages":[{"role":"user","content":"ping"}]}'
 )"
-cat /tmp/hermes-gw-stream.out
+cat /tmp/hermes-gw-rf.out
 printf '\n'
-if [[ "$stream_status" != "400" ]]; then
-  printf 'Expected stream request to return 400, got %s\n' "$stream_status" >&2
+if [[ "$rf_status" != "400" ]]; then
+  printf 'Expected response_format request to return 400, got %s\n' "$rf_status" >&2
   exit 1
 fi
 
